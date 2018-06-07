@@ -1,0 +1,82 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Wed Jun  6 19:10:03 2018
+
+@author: shaun
+"""
+from multiprocessing import Pool
+from itertools import repeat
+import configparser
+import requests
+from bs4 import BeautifulSoup
+import os
+import shutil
+import uuid
+from math import ceil
+
+
+def download_images(url_list, output_path='./images'):
+
+    # loop through urls in list
+    for url in url_list:
+        # Split the list with the / delimiter
+        url_split = url.split('/')
+
+        # Creaate a unique image name using UUID
+        img_name = '%s_%s' % (url_split[-1].split('.')[0], str(uuid.uuid1()))
+
+        # Get the image extension
+        img_ext = url_split[-1].split('.')[1]
+        path = '%s/%s.%s' % (output_path, img_name[0:12], img_ext)
+
+        # download the image as a stream
+        try:
+            img = requests.get(url, stream=True)
+            if img.status_code == 200:
+                with open(path, 'wb') as f:
+                    img.raw.decode_content = True
+                    shutil.copyfileobj(img.raw, f)
+        except:
+            print('error with URL: %s' % (url))
+
+
+# split a list into evenly sized chunks
+def chunks(l, n):
+    return [l[i:i+n] for i in range(0, len(l), n)]
+
+
+def dispatch_download(urls, output_path, cpus=os.cpu_count()):
+
+    # Check if path does not exist then create it
+    if not os.path.exists('./images/forklifts'):
+        os.makedirs('./images/forklifts')
+
+    # Determine the length of the list
+    total = len(urls)
+
+    # Calculate approximately equally sized lists
+    chunk_size = ceil(total / cpus)
+
+    # Create a list of lists that are approximately equally sized
+    slices = chunks(urls, chunk_size)
+
+    pool = Pool(processes=cpus)
+    pool.starmap(download_images, zip(slices, repeat(output_path, len(slices))))
+
+
+if __name__ == '__main__':
+
+    # Read config file where the image classes and URL are contained.
+    config = configparser.ConfigParser()
+    config.read('./config.ini')
+
+    img_classes = {key:config['IMAGE_CLASSES'][key] for key in config['IMAGE_CLASSES']}
+
+    # Collect and parse first page
+    for key, val in img_classes.items():
+        page = requests.get(val)
+        soup = BeautifulSoup(page.text, 'html.parser')
+        image_urls = soup.contents[0].split('\r\n')
+
+        dispatch_download(image_urls, './images/%s' % (key))
