@@ -40,6 +40,8 @@ import os
 import shutil
 import uuid
 from math import ceil
+from PIL import Image
+import glob
 
 
 def download_images(url_list, output_path):
@@ -52,7 +54,9 @@ def download_images(url_list, output_path):
     '''
     error_list = []
     # loop through urls in list
-    for url in url_list:
+    for index in enumerate(url_list):
+        url = index[1]
+        url_output = output_path[index[0]]
         # Split the list with the / delimiter
         url_split = url.split('/')
 
@@ -61,8 +65,7 @@ def download_images(url_list, output_path):
 
         # Get the image extension
         img_ext = url_split[-1].split('.')[1]
-        path = '%s/%s.%s' % (output_path, img_name[0:12], img_ext)
-
+        path = '%s/%s.%s' % (url_output, img_name[0:12], img_ext)
         # download the image as a stream
         try:
             img = requests.get(url, stream=True)
@@ -70,10 +73,11 @@ def download_images(url_list, output_path):
                 with open(path, 'wb') as f:
                     img.raw.decode_content = True
                     shutil.copyfileobj(img.raw, f)
-                    print('Downloading %s...' % (path))
-        except:
-            print('Error Downloading image: %s' %(url))
+        except Exception as e:
+            print('%s - %s' % (url, e))
             error_list.append(path)
+
+    return error_list
 
 
 def list_splitter(l, n):
@@ -101,27 +105,87 @@ def directory_check(path):
             raise ValueError(e)
 
 
+def remove_broken_images(image_list):
+    '''
+    Description: Function to remove broken images in case they got through
+    Arguments: image_list - List of file pathnames
+    Return:
+    '''
+    if image_list:
+        flatten_list = [path for sublist in image_list for path in sublist]
+        for img in flatten_list:
+            if os.path.exists(img):
+                try:
+                    os.remove(img)
+                except Exception as e:
+                    raise ValueError(e)
+
+
+def remove_corrupted_images(image_dir):
+    '''
+    Description: Function to remove corrupted images
+    Arguments: image_dir - String of directory of images stored
+    Return: removed - List of removed images
+    '''
+    # Initialize list
+    corrupted = []
+    # Find all files and directories in image path
+    for file in glob.iglob(image_dir + '/**/*', recursive=True):
+
+        # check if path is a file or directory
+        if os.path.isfile(file):
+            try:
+                # test if file can be opened
+                img = Image.open(file)
+
+                #verify that file is an image
+                img.verify()
+
+                # split pathname into file and extension
+                file_name, file_ext = os.path.splitext(file)
+                file_ext = file_ext.replace('.', '')
+                if not file_ext.upper() == img.format:
+                    os.rename(file, file_name + '.' + img.format)
+            except:
+                corrupted.append(file)
+
+    removed = []
+    for i in corrupted:
+        try:
+            img = Image.open(i)
+            img.verify()
+        except:
+            try:
+                os.remove(i)
+                removed.append(i)
+            except Exception as e:
+                raise ValueError(e)
+    return removed
+
+
 def dispatch_download(img_list, jobs=os.cpu_count()):
     '''
     Description: Function to execute image download in parallel.
     Arguments: urls_dict - Dictionary of class and image URLS
                jobs - Integer of jobs to execute in parallel [Default: number of CPUs]
-    Return: error_urls - List of URLS that return an error.
+    Return: error_images - List of images that return an error.
     '''
     # Determine the length of the list
-    total = len(img_list)
+    total = len(img_list[0])
 
     # Calculate approximately equally sized lists
     chunk_size = ceil(total / jobs)
 
     # Create a list of lists that are approximately equally sized
-    slices = list_splitter(img_list, chunk_size)
+    url_slices = list_splitter(img_list[0], chunk_size)
+    class_slices = list_splitter(img_list[1], chunk_size)
 
     pool = Pool(jobs)
-    error_urls = pool.starmap(download_images, [slices])
+    error_images = pool.starmap(download_images, list(zip(url_slices, class_slices)))
     pool.close()
     pool.join()
-    print(error_urls)
+    remove_broken_images(error_images)
+
 
 if __name__ == '__main__':
 
@@ -147,8 +211,8 @@ if __name__ == '__main__':
         cached_image_class_path = config.get('PATHS', 'cached_image_class_path')
         cache_image_name = config.get('DEFAULTS', 'cache_image_name')
 
-        # if cache pickle file exists then load it, otherwise create the directory
-        # if it doesn't exist and continue with loading from imagenet
+        # if cache pickle file exists then load it, otherwise create the
+        # directory if it doesn't exist and continue with loading from imagenet
         if os.path.exists('%s/%s' % (cached_image_class_path, cache_image_name)):
             load_cache = True
         elif not os.path.exists(cached_image_class_path):
@@ -192,13 +256,13 @@ if __name__ == '__main__':
         if cached_image_class:
             try:
                 pickle.dump(img_col,
-                            open( '%s/%s' % (cached_image_class_path,
-                                             cache_image_name), "wb" ) )
+                            open('%s/%s' % (cached_image_class_path,
+                                            cache_image_name), "wb"))
             except Exception as e:
                 raise ValueError(e)
     else:
         try:
-            img_col = pickle.load(open(cache_image_name, "rb" ))
+            img_col = pickle.load(open(cache_image_name, "rb"))
         except Exception as e:
             raise ValueError(e)
 
@@ -221,5 +285,13 @@ if __name__ == '__main__':
     # Flatten the list of lists
     comb_list = [item for sublist in comb_list for item in sublist]
 
+    # Split list into URLs and classes
+    split_list = [[i[0] for i in comb_list], [i[1] for i in comb_list]]
+
     # Start executing the download of images
-    dispatch_download(comb_list)
+    dispatch_download(split_list)
+
+    # Remove any corrupted files or files that no longer exist
+    remove_corrupted_images(filepath)
+
+    print("Download complete")
