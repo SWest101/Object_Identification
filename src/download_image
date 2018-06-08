@@ -2,13 +2,39 @@
 # -*- coding: utf-8 -*-
 """
 Created on Wed Jun  6 19:10:03 2018
+@author: Shaun
+@Description: This script serves the purpose of downloading image classes from
+              the relevant URLS as specified by the
+              Imagenet (http://www.image-net.org/) repository.
 
-@author: shaun
+@Disclaimer:
+The MIT License
+
+Copyright © 2010-2016 Mitchell Hashimoto
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the “Software”), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included
+in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 """
 from multiprocessing import Pool
 from itertools import repeat
 import configparser
 import requests
+import pickle
 from bs4 import BeautifulSoup
 import os
 import shutil
@@ -16,8 +42,15 @@ import uuid
 from math import ceil
 
 
-def download_images(url_list, output_path='./images'):
-
+def download_images(url_list, output_path):
+    '''
+    Description: Function to loop through list of URLs and download them into
+                 their relavent directory
+    Arguments: url_list - List of URLS
+               output_path - String of the image folder destination
+    Return: error_list - List of image paths that are corrupted
+    '''
+    error_list = []
     # loop through urls in list
     for url in url_list:
         # Split the list with the / delimiter
@@ -37,46 +70,156 @@ def download_images(url_list, output_path='./images'):
                 with open(path, 'wb') as f:
                     img.raw.decode_content = True
                     shutil.copyfileobj(img.raw, f)
+                    print('Downloading %s...' % (path))
         except:
-            print('error with URL: %s' % (url))
+            print('Error Downloading image: %s' %(url))
+            error_list.append(path)
 
 
-# split a list into evenly sized chunks
-def chunks(l, n):
+def list_splitter(l, n):
+    '''
+    Description: Function to segment a list into equal sized sub-lists.
+    Arguments: l - List
+               n - Integer number of equally sized sublists
+    Return: List of lists
+    '''
     return [l[i:i+n] for i in range(0, len(l), n)]
 
 
-def dispatch_download(urls, output_path, cpus=os.cpu_count()):
-
+def directory_check(path):
+    '''
+    Description: Function to check if path exists and to create it if it
+                does not.
+    Arguments: path - String
+    Return:
+    '''
     # Check if path does not exist then create it
-    if not os.path.exists('./images/forklifts'):
-        os.makedirs('./images/forklifts')
+    if not os.path.exists(path):
+        try:
+            os.makedirs(path)
+        except Exception as e:
+            raise ValueError(e)
 
+
+def dispatch_download(img_list, jobs=os.cpu_count()):
+    '''
+    Description: Function to execute image download in parallel.
+    Arguments: urls_dict - Dictionary of class and image URLS
+               jobs - Integer of jobs to execute in parallel [Default: number of CPUs]
+    Return: error_urls - List of URLS that return an error.
+    '''
     # Determine the length of the list
-    total = len(urls)
+    total = len(img_list)
 
     # Calculate approximately equally sized lists
-    chunk_size = ceil(total / cpus)
+    chunk_size = ceil(total / jobs)
 
     # Create a list of lists that are approximately equally sized
-    slices = chunks(urls, chunk_size)
+    slices = list_splitter(img_list, chunk_size)
 
-    pool = Pool(processes=cpus)
-    pool.starmap(download_images, zip(slices, repeat(output_path, len(slices))))
-
+    pool = Pool(jobs)
+    error_urls = pool.starmap(download_images, [slices])
+    pool.close()
+    pool.join()
+    print(error_urls)
 
 if __name__ == '__main__':
 
+    ###############################################################
+    # Application configuration                                   #
+    ###############################################################
     # Read config file where the image classes and URL are contained.
     config = configparser.ConfigParser()
-    config.read('./config.ini')
+    try:
+        config.read('./config.ini')
+    except Exception as e:
+        raise ValueError(e)
 
+    # File paths
+    filepath = config.get('PATHS', 'image_directory')
+
+    # Determine if cache source should be used. This speeds up the list process
+    # as Imagenet can be slow.
+    cached_image_class = config.getboolean('DEFAULTS', 'cached_image_classes')
+
+    load_cache = False
+    if cached_image_class:
+        cached_image_class_path = config.get('PATHS', 'cached_image_class_path')
+        cache_image_name = config.get('DEFAULTS', 'cache_image_name')
+
+        # if cache pickle file exists then load it, otherwise create the directory
+        # if it doesn't exist and continue with loading from imagenet
+        if os.path.exists('%s/%s' % (cached_image_class_path, cache_image_name)):
+            load_cache = True
+        elif not os.path.exists(cached_image_class_path):
+            os.path.mkdir(cached_image_class_path)
+
+    # Dictionary of class and url combinations
     img_classes = {key:config['IMAGE_CLASSES'][key] for key in config['IMAGE_CLASSES']}
 
-    # Collect and parse first page
-    for key, val in img_classes.items():
-        page = requests.get(val)
-        soup = BeautifulSoup(page.text, 'html.parser')
-        image_urls = soup.contents[0].split('\r\n')
+    ###############################################################
+    # Data Ingestion                                              #
+    ###############################################################
 
-        dispatch_download(image_urls, './images/%s' % (key))
+    # Initializing variables
+    if not load_cache:
+        img_col = {}
+        url_count = 0
+        # Collect and parse web page class urls
+        for key, val in img_classes.items():
+            try:
+                # Get the webpage
+                page = requests.get(val)
+            except Exception as e:
+                raise ValueError(e)
+
+            # Parse as an html page
+            soup = BeautifulSoup(page.text, 'html.parser')
+
+            # Split URLS on \r\n delimiter
+            image_urls = soup.contents[0].split('\r\n')
+
+            # Remove any blank items from list as a result of the list delimiter
+            image_urls = list(filter(lambda i: '\n' not in i, image_urls))
+
+            # Update the total number of image counter
+            url_count = url_count + len(image_urls)
+
+            # Add category and list to dictionary
+            img_col.update({key: image_urls})
+
+        # Save img_col dictionary to a pickle file if cached images is set
+        if cached_image_class:
+            try:
+                pickle.dump(img_col,
+                            open( '%s/%s' % (cached_image_class_path,
+                                             cache_image_name), "wb" ) )
+            except Exception as e:
+                raise ValueError(e)
+    else:
+        try:
+            img_col = pickle.load(open(cache_image_name, "rb" ))
+        except Exception as e:
+            raise ValueError(e)
+
+    ###############################################################
+    # Data Formatting and job Execution                           #
+    ###############################################################
+
+    comb_list = []
+    for key, val in img_col.items():
+        # Construct image directory path
+        img_path = '%s/%s' % (filepath, key)
+
+        # Check if the directy path exists
+        directory_check(img_path)
+
+        # Create a list of lists of tuples
+        # Example: [[(url, path), (url, path)], [(url, path)]]
+        comb_list.append(list(zip(val, repeat(img_path, len(val)))))
+
+    # Flatten the list of lists
+    comb_list = [item for sublist in comb_list for item in sublist]
+
+    # Start executing the download of images
+    dispatch_download(comb_list)
